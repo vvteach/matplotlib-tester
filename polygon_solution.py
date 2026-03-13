@@ -18,6 +18,32 @@ PRINT_LINES = 1
 
 ##########################################################
 
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+"""
+matplotlib_tester.py — перехватчик matplotlib (без настоящего matplotlib)
+
+Идея:
+- matplotlib НЕ импортируется и НЕ используется.
+- Подсовываем пользователю "фейковый" модуль matplotlib.pyplot,
+  который перехватывает plot/bar/pie/hist/title/xlabel/ylabel/legend/xticks/subplots/gca и т.п.
+- Результат — только текстовый вывод print_ax(...).
+
+ENV-флаги (0/1):
+  PRINT_LINES
+  PRINT_BARS
+  PRINT_PIES
+  PRINT_PIE_LABELS
+  PRINT_XTICKS
+  PRINT_TITLE
+  PRINT_AXIS
+  PRINT_LABELS
+
+Опционально для проверки labels в pie:
+  PIE_LABELS="A,B,C"
+"""
+
 import os
 import sys
 import types
@@ -49,7 +75,7 @@ def _as_list(x: Any) -> List[Any]:
     if isinstance(x, (list, tuple)):
         return list(x)
     try:
-        return list(x)  # range, numpy array-like
+        return list(x)
     except Exception:
         return [x]
 
@@ -63,7 +89,7 @@ def _round2(v: Any) -> Any:
 
 
 # =========================
-# Models (our "plot model")
+# Models
 # =========================
 @dataclass
 class LineModel:
@@ -143,6 +169,9 @@ class _FakeAxes:
     def pie(self, *args, **kwargs):
         return _pyplot_pie(*args, **kwargs)
 
+    def hist(self, *args, **kwargs):
+        return _pyplot_hist(*args, **kwargs)
+
     def set_title(self, s: str):
         STATE.title = str(s)
 
@@ -163,7 +192,6 @@ class _FakeAxes:
         def _dummy(*args, **kwargs):
             return None
         return _dummy
-
 
 
 def _ensure_axes() -> _FakeAxes:
@@ -254,7 +282,6 @@ def _pyplot_bar(x, height=None, width=0.8, *args, **kwargs):
     xs = _as_list(x)
     hs = _as_list(height)
 
-    # если x — строки (категории), сохраним xtick labels
     if xs and all(isinstance(v, str) for v in xs):
         STATE.xtick_labels = [str(v) for v in xs]
         xs_num = list(range(len(xs)))
@@ -269,20 +296,78 @@ def _pyplot_bar(x, height=None, width=0.8, *args, **kwargs):
     for xc, h in zip(xs_num, hs):
         left = float(xc) - w / 2.0
         hh = float(h)
-        # Для текстовой проверки храним "столбик" как (x_left, y=0, w, h=hh)
         STATE.rects.append(RectModel(x=left, y=0.0, w=w, h=hh))
     return None
 
 
+def _pyplot_hist(x, bins=10, *args, **kwargs):
+    """
+    Поддерживаем базовые варианты:
+      hist(data)
+      hist(data, bins=5)
+      hist(data, bins=[0, 1, 3, 10])
+
+    Результат сохраняем как прямоугольники в STATE.rects,
+    чтобы print_ax(bars=True) их печатал.
+    """
+    data = [float(v) for v in _as_list(x)]
+    if not data:
+        return None
+
+    if isinstance(bins, int):
+        if bins <= 0:
+            return None
+
+        mn = min(data)
+        mx = max(data)
+
+        if mn == mx:
+            left = mn - 0.5
+            right = mx + 0.5
+            step = (right - left) / bins
+            edges = [left + i * step for i in range(bins + 1)]
+        else:
+            step = (mx - mn) / bins
+            edges = [mn + i * step for i in range(bins + 1)]
+    else:
+        edges = [float(v) for v in _as_list(bins)]
+        if len(edges) < 2:
+            return None
+        bins = len(edges) - 1
+
+    counts = [0] * bins
+
+    for v in data:
+        placed = False
+        for i in range(bins):
+            left = edges[i]
+            right = edges[i + 1]
+
+            if i == bins - 1:
+                if left <= v <= right:
+                    counts[i] += 1
+                    placed = True
+                    break
+            else:
+                if left <= v < right:
+                    counts[i] += 1
+                    placed = True
+                    break
+
+        if not placed and v == edges[-1]:
+            counts[-1] += 1
+
+    for i in range(bins):
+        left = edges[i]
+        right = edges[i + 1]
+        width = right - left
+        height = counts[i]
+        STATE.rects.append(RectModel(x=left, y=0.0, w=width, h=float(height)))
+
+    return counts, edges, None
+
+
 def _pyplot_pie(x, *args, **kwargs):
-    """
-    Симуляция matplotlib.pyplot.pie:
-    - считаем углы theta1/theta2 (градусы)
-    - считаем позиции labels примерно как matplotlib:
-        mid = (theta1+theta2)/2
-        pos = (labeldistance*cos(mid), labeldistance*sin(mid))
-      (по умолчанию labeldistance=1.1)
-    """
     vals = [float(v) for v in _as_list(x)]
     labels = [str(t) for t in _as_list(kwargs.get("labels", []))]
 
@@ -309,7 +394,6 @@ def _pyplot_pie(x, *args, **kwargs):
             t1 = theta
             t2 = theta - ang
             theta = t2
-            # печатный формат ожидает theta1 <= theta2
             if t2 < t1:
                 t1, t2 = t2, t1
 
@@ -336,7 +420,6 @@ def print_ax(lines=False, bars=False, pies=False,
              xticks=False,
              title=False, axis_labels=False, plot_labes=False):
 
-    # ===== ЛИНИИ =====
     if lines:
         print('На холсте найдено линий: {}.'.format(len(STATE.lines)))
         for i, ln in enumerate(STATE.lines, start=1):
@@ -344,7 +427,6 @@ def print_ax(lines=False, bars=False, pies=False,
             for j, (x, y) in enumerate(zip(ln.xs, ln.ys)):
                 print('Л.{},т.{:03}: ({:+7.2f},{:+7.2f})'.format(i, j, _round2(x), _round2(y)))
 
-    # ===== BAR =====
     if bars:
         if STATE.rects:
             print('На холсте найдено прямоугольников (bar/rect): {}.'.format(len(STATE.rects)))
@@ -355,7 +437,6 @@ def print_ax(lines=False, bars=False, pies=False,
         else:
             print('Прямоугольников (bar/rect) не найдено.')
 
-    # ===== PIE (Wedge) =====
     if pies:
         if STATE.pies:
             pie = STATE.pies[-1]
@@ -368,7 +449,6 @@ def print_ax(lines=False, bars=False, pies=False,
         else:
             print('Секторов pie (Wedge) не найдено.')
 
-    # ===== PIE LABELS =====
     if pie_labels:
         if STATE.pies and STATE.pies[-1].label_texts:
             print('===== PIE LABELS =====')
@@ -389,7 +469,6 @@ def print_ax(lines=False, bars=False, pies=False,
         else:
             print('PIE LABELS не найдены.')
 
-    # ===== X-TICKS =====
     if xticks:
         if STATE.xtick_labels:
             print('Подписи по оси X (xtick labels): {}'.format(len(STATE.xtick_labels)))
@@ -398,16 +477,13 @@ def print_ax(lines=False, bars=False, pies=False,
         else:
             print('Подписей по оси X нет.')
 
-    # ===== Заголовок =====
     if title:
         print('Заголовок:', STATE.title)
 
-    # ===== Подписи осей =====
     if axis_labels:
         print('Подпись оси x:', STATE.xlabel)
         print('Подпись оси y:', STATE.ylabel)
 
-    # ===== Labels линий =====
     if plot_labes:
         for i, ln in enumerate(STATE.lines, start=1):
             print('Подписи линии {}: {}'.format(i, repr(ln.label)))
@@ -422,14 +498,12 @@ def _install_fake_matplotlib() -> None:
       import matplotlib.pyplot as plt
     импортировал наш фейковый pyplot.
 
-    Плюс: любые неизвестные команды matplotlib/pyplot/patches игнорируются,
-    чтобы тестер никогда не падал на незнакомых вызовах.
+    Плюс: любые неизвестные команды matplotlib/pyplot/patches игнорируются.
     """
     matplotlib_mod = types.ModuleType("matplotlib")
     pyplot_mod = types.ModuleType("matplotlib.pyplot")
     patches_mod = types.ModuleType("matplotlib.patches")
 
-    # pyplot API (поддерживаемое)
     pyplot_mod.subplots = subplots
     pyplot_mod.gca = gca
     pyplot_mod.gcf = gcf
@@ -438,23 +512,22 @@ def _install_fake_matplotlib() -> None:
     pyplot_mod.plot = _pyplot_plot
     pyplot_mod.bar = _pyplot_bar
     pyplot_mod.pie = _pyplot_pie
+    pyplot_mod.hist = _pyplot_hist
     pyplot_mod.title = title
     pyplot_mod.xlabel = xlabel
     pyplot_mod.ylabel = ylabel
     pyplot_mod.legend = legend
     pyplot_mod.xticks = xticks
 
-    # минимальные заглушки классов patches (если кто-то импортирует)
-    class Rectangle:  # pragma: no cover
+    class Rectangle:
         pass
 
-    class Wedge:  # pragma: no cover
+    class Wedge:
         pass
 
     patches_mod.Rectangle = Rectangle
     patches_mod.Wedge = Wedge
 
-    # --- Fallback: любые неизвестные команды просто игнорируем ---
     def _dummy(*args, **kwargs):
         return None
 
@@ -465,7 +538,6 @@ def _install_fake_matplotlib() -> None:
     patches_mod.__getattr__ = _module_getattr
     matplotlib_mod.__getattr__ = _module_getattr
 
-    # attach
     matplotlib_mod.pyplot = pyplot_mod
     matplotlib_mod.patches = patches_mod
 
@@ -473,15 +545,8 @@ def _install_fake_matplotlib() -> None:
     sys.modules["matplotlib.pyplot"] = pyplot_mod
     sys.modules["matplotlib.patches"] = patches_mod
 
+
 if __name__ == "__main__":
-
-    for line in options.strip().splitlines():
-        if '=' in line:
-            key, value = line.split('=', 1)
-            key = key.strip()
-            value = value.strip()
-            os.environ[key] = value
-
     PRINT_LINES = env_flag("PRINT_LINES")
     PRINT_BARS = env_flag("PRINT_BARS")
     PRINT_PIES = env_flag("PRINT_PIES")
@@ -491,9 +556,11 @@ if __name__ == "__main__":
     PRINT_AXIS = env_flag("PRINT_AXIS")
     PRINT_LABELS = env_flag("PRINT_LABELS")
 
-    code_lines = user_pgm.split("\n")
+    user_pgm = sys.argv[1]
 
-    # вырезаем show() и любые exec в пользовательском коде
+    with open(user_pgm, "r", encoding="utf-8") as f:
+        code_lines = f.read().splitlines()
+
     for i in range(len(code_lines) - 1, -1, -1):
         line = code_lines[i]
         if ".show()" in line:
@@ -501,29 +568,15 @@ if __name__ == "__main__":
         elif "exec" in line:
             code_lines.pop(i)
 
-    # --- Fallback: любые неизвестные команды pyplot просто игнорируем ---
-    def _dummy(*args, **kwargs):
-        return None
-
-    def _module_getattr(name):
-        return _dummy
-
-    # Подсовываем фейковый matplotlib
     _install_fake_matplotlib()
 
-    # Важно: alias, чтобы `from matplotlib_tester import print_ax` ссылался на этот же модуль
     sys.modules["matplotlib_tester"] = sys.modules[__name__]
 
-    # Добавляем вызов print_ax в конец (без повторного импорта)
     code_lines.append(
         f'print_ax({PRINT_LINES}, {PRINT_BARS}, {PRINT_PIES}, '
         f'{PRINT_PIE_LABELS}, {PRINT_XTICKS}, {PRINT_TITLE}, '
         f'{PRINT_AXIS}, {PRINT_LABELS})'
     )
 
-
-
     code = "\n".join(code_lines)
-
-    # Выполняем в текущих globals(), чтобы STATE/print_ax были общими
     exec(compile(code, user_pgm, "exec"), globals())
